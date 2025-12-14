@@ -10,11 +10,12 @@ import (
 )
 
 func Open() (*sql.DB, error) {
-	db, err := sql.Open("pgx", "host=localhost user=postgres password=lol dbname=postgres port=5432 sslmode=disable")
+	connectionStr := `host=localhost user=postgres password=lol dbname=postgres port=5432 sslmode=disable`
+	db, err := sql.Open("pgx", connectionStr)
 	if err != nil {
 		return nil, fmt.Errorf("db: Open %w", err)
 	}
-	fmt.Println("Connected to database...")
+	fmt.Println("✅ Database Connected")
 
 	return db, nil
 }

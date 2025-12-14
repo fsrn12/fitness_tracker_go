@@ -1,16 +1,57 @@
 package store
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
+	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
+type password struct {
+	plainText *string
+	hash      []byte
+}
+
+func (p *password) Set(plainTextPassword string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(plainTextPassword), 12)
+	if err != nil {
+		return err
+	}
+	p.plainText = &plainTextPassword
+	p.hash = hash
+	return nil
+}
+
+func (p *password) Matches(plainTextPassword string) (bool, error) {
+	err := bcrypt.CompareHashAndPassword(p.hash, []byte(plainTextPassword))
+	if err != nil {
+		switch {
+		case errors.Is(err, bcrypt.ErrMismatchedHashAndPassword):
+			return false, nil
+		default:
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 type User struct {
-	ID           int    `json:"id"`
-	Username     string `json:"username"`
-	Email        string `json:"email"`
-	PasswordHash string `json:"password"`
-	Bio          string `json:"bio"`
+	ID           int       `json:"id"`
+	Username     string    `json:"username"`
+	Email        string    `json:"email"`
+	PasswordHash password  `json:"_"`
+	Bio          string    `json:"bio"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+var AnonymousUser = &User{}
+
+func (u *User) IsAnonymous() bool {
+	return u == AnonymousUser
 }
 
 type PostgresUserStore struct {
@@ -18,14 +59,19 @@ type PostgresUserStore struct {
 }
 
 func NewPostgresUserStore(db *sql.DB) *PostgresUserStore {
-	return &PostgresUserStore{db: db}
+	return &PostgresUserStore{
+		db: db,
+	}
 }
 
 type UserStore interface {
 	CreateUser(*User) (*User, error)
 	GetUserByID(id int64) (*User, error)
+	GetUserByUsername(username string) (*User, error)
 	UpdateUser(*User) error
 	DeleteUser(id int64) error
+	GetUserToken(scope, plainTextPassword string) (*User, error)
+	// GetUserToken(scope, tokenPlainText string) (*User, error)
 }
 
 func (pg *PostgresUserStore) CreateUser(user *User) (*User, error) {
@@ -39,10 +85,10 @@ func (pg *PostgresUserStore) CreateUser(user *User) (*User, error) {
 	query := `
 	INSERT INTO users (username, email, password_hash, bio)
 	VALUES ($1, $2, $3, $4)
-	RETURNING id
+	RETURNING id, created_at, updated_at
 	`
 
-	err = tx.QueryRow(query, user.Username, user.Email, user.PasswordHash, user.Bio).Scan(&user.ID)
+	err = tx.QueryRow(query, user.Username, user.Email, user.PasswordHash.hash, user.Bio).Scan(&user.ID, &user.CreatedAt, &user.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -56,16 +102,48 @@ func (pg *PostgresUserStore) CreateUser(user *User) (*User, error) {
 
 }
 
-func (pg *PostgresUserStore) GetUserByID(id int64) (*User, error) {
-	user := &User{}
+func (pg *PostgresUserStore) GetUserByUsername(username string) (*User, error) {
+	user := &User{
+		PasswordHash: password{},
+	}
 
 	userQuery := `
-	SELECT id, username, email, password_hash, bio
+	SELECT id, username, email,password_hash, bio, created_at, updated_at
+	FROM users
+	WHERE username = $1
+	`
+	err := pg.db.QueryRow(userQuery, username).Scan(
+		&user.ID,
+		&user.Username,
+		&user.Email,
+		&user.PasswordHash.hash,
+		&user.Bio,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
+func (pg *PostgresUserStore) GetUserByID(id int64) (*User, error) {
+	user := &User{
+		PasswordHash: password{},
+	}
+
+	userQuery := `
+	SELECT id, username, email, password_hash, bio, created_at, updated_at
 	FROM users
 	WHERE id = $1
 	`
 
-	err := pg.db.QueryRow(userQuery, id).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash, &user.Bio)
+	err := pg.db.QueryRow(userQuery, id).Scan(&user.ID, &user.Username, &user.Email, &user.PasswordHash.hash, &user.Bio, &user.CreatedAt, &user.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -88,7 +166,7 @@ func (pg *PostgresUserStore) UpdateUser(user *User) error {
 
 	userQuery := `
 	UPDATE users
-	SET username = $1, email = $2, bio = $3
+	SET username = $1, email = $2, bio = $3, updated_at = CURRENT_TIMESTAMP
 	WHERE id = $4
 	`
 
@@ -129,4 +207,35 @@ func (pg *PostgresUserStore) DeleteUser(id int64) error {
 	fmt.Println("Item Deleted Successfully")
 
 	return nil
+}
+
+func (s *PostgresUserStore) GetUserToken(scope, plainTextPassword string) (*User, error) {
+	tokenHash := sha256.Sum256([]byte(plainTextPassword))
+	query := `
+	SELECT u.id, u.username, u.email, u.password_hash, u.bio, u.created_at, u.updated_at
+	FROM users u
+	INNER JOIN tokens t ON t.user_id = u.id
+	WHERE t.hash = $1 AND t.scope = $2 AND t.expiry > $3
+	`
+	user := &User{
+		PasswordHash: password{},
+	}
+	err := s.db.QueryRow(query, tokenHash[:], scope, time.Now()).Scan(
+		&user.ID,
+		&user.Username,
+		&user.Email,
+		&user.PasswordHash.hash,
+		&user.Bio,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
 }

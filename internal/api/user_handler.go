@@ -3,90 +3,148 @@ package api
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"log"
 	"net/http"
-	"strconv"
+	"regexp"
 
 	"github.com/fsrn12/fitness_tracker_go/internal/store"
-	"github.com/go-chi/chi/v5"
+	"github.com/fsrn12/fitness_tracker_go/internal/utils"
 )
+
+type registerUserRequest struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Bio      string `json:"bio"`
+}
 
 type UserHandler struct {
 	userStore store.UserStore
+	logger    *log.Logger
 }
 
-func NewUserHandler(userStore store.UserStore) *UserHandler {
-	return &UserHandler{userStore: userStore}
+func NewUserHandler(userStore store.UserStore, logger *log.Logger) *UserHandler {
+	return &UserHandler{
+		userStore: userStore,
+		logger:    logger,
+	}
+}
+
+func (uh *UserHandler) validateUserRegisterRequest(req *registerUserRequest) error {
+	if req.Username == "" || len(req.Username) < 2 || len(req.Username) > 50 {
+		return errors.New("user name is required. It must be at least 2 to 50 characters long")
+	}
+
+	if req.Email == "" {
+		return errors.New("email is required")
+	}
+
+	emailRegex := regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`)
+	if !emailRegex.MatchString(req.Email) {
+		return errors.New("invalid email format")
+	}
+
+	if req.Password == "" {
+		return errors.New("password is required and it must be between 8 to 32 characters long")
+	}
+
+	_, err := utils.ValidatePassword(req.Password)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (uh *UserHandler) HandleRegisterUser(w http.ResponseWriter, r *http.Request) {
+	var req registerUserRequest
+	err := json.NewDecoder(r.Body).Decode(&req)
+	if err != nil {
+		uh.logger.Printf("ERROR: decoding new user register request %v\n", err)
+		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": "invalid request payload"})
+		return
+	}
+
+	err = uh.validateUserRegisterRequest(&req)
+	if err != nil {
+		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": err.Error()})
+		return
+	}
+
+	user := &store.User{
+		Username: req.Username,
+		Email:    req.Email,
+	}
+	if req.Bio != "" {
+		user.Bio = req.Bio
+	}
+	err = user.PasswordHash.Set(req.Password)
+	if err != nil {
+		uh.logger.Printf("ERROR: hashing password %v\n", err)
+		utils.WriteJSON(w, http.StatusInternalServerError, utils.Envelope{"error": "internal server error"})
+		return
+	}
+
+	_, err = uh.userStore.CreateUser(user)
+	if err != nil {
+		uh.logger.Printf("ERROR: registering user %v\n", err)
+		utils.WriteJSON(w, http.StatusInternalServerError, utils.Envelope{"error": "internal server error"})
+		return
+	}
+
+	utils.WriteJSON(w, http.StatusCreated, utils.Envelope{"data": user})
+
 }
 
 func (uh *UserHandler) HandleCreateUser(w http.ResponseWriter, r *http.Request) {
-	// fmt.Fprintf(w, "Created a new User\n")
 	var user store.User
 	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
-		fmt.Println(err)
-		http.Error(w, "Failed to create new user", http.StatusInternalServerError)
+		uh.logger.Printf("ERROR - CreateUserRequestDecoding: %v\n", err)
+		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": "invalid request sent"})
 		return
 	}
 
 	createdUser, err := uh.userStore.CreateUser(&user)
 	if err != nil {
-		fmt.Println(err)
-		http.Error(w, "Failed to create new workout", http.StatusInternalServerError)
+		uh.logger.Printf("ERROR - CreateUser(): %v\n", err)
+		utils.WriteJSON(w, http.StatusInternalServerError, utils.Envelope{"error": "Failed to create user"})
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(createdUser)
-
+	utils.WriteJSON(w, http.StatusCreated, utils.Envelope{"data": createdUser})
 }
 
 func (uh *UserHandler) HandleGetUserByID(w http.ResponseWriter, r *http.Request) {
-	paramUserId := chi.URLParam(r, "id")
-	if paramUserId == "" {
-		http.NotFound(w, r)
-		return
-	}
-	userID, err := strconv.ParseInt(paramUserId, 10, 64)
+	userID, err := utils.GetParamID(r)
 	if err != nil {
-		http.NotFound(w, r)
+		uh.logger.Printf("ERROR: GetParamID => %v\n", err)
+		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": "invalid workout id"})
 		return
 	}
-
-	fmt.Fprintf(w, "User ID: %d\n", userID)
 
 	user, err := uh.userStore.GetUserByID(userID)
 	if err != nil {
-		fmt.Println(err)
-		http.Error(w, "Could not find user", http.StatusNotFound)
+		uh.logger.Printf("ERROR - GetWorkoutByID(): %v\n", err)
+		utils.WriteJSON(w, http.StatusInternalServerError, utils.Envelope{"error": "internal server error"})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(user)
-
+	utils.WriteJSON(w, http.StatusOK, utils.Envelope{"data": user})
 }
 
 func (uh *UserHandler) HandleUpdateUserByID(w http.ResponseWriter, r *http.Request) {
-
-	paramUserId := chi.URLParam(r, "id")
-	if paramUserId == "" {
-		http.NotFound(w, r)
-		return
-	}
-	userID, err := strconv.ParseInt(paramUserId, 10, 64)
+	userID, err := utils.GetParamID(r)
 	if err != nil {
-		http.NotFound(w, r)
+		uh.logger.Printf("ERROR: GetParamID => %v\n", err)
+		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": "invalid user id"})
 		return
 	}
-
-	fmt.Fprintf(w, "User ID: %d\n", userID)
 
 	existingUser, err := uh.userStore.GetUserByID(userID)
 	if err != nil {
-		fmt.Println(err)
-		http.Error(w, "Could not find user", http.StatusNotFound)
+		uh.logger.Printf("ERROR - GetUserByID() -> UpdateUser(): %v\n", err)
+		utils.WriteJSON(w, http.StatusInternalServerError, utils.Envelope{"error": "internal server error"})
 		return
 	}
 
@@ -103,8 +161,8 @@ func (uh *UserHandler) HandleUpdateUserByID(w http.ResponseWriter, r *http.Reque
 
 	err = json.NewDecoder(r.Body).Decode(&updateUserRequest)
 	if err != nil {
-		fmt.Println(err)
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		uh.logger.Printf("ERROR - updateUserRequestDecoding: %v\n", err)
+		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": "invalid request payload"})
 		return
 	}
 
@@ -120,40 +178,39 @@ func (uh *UserHandler) HandleUpdateUserByID(w http.ResponseWriter, r *http.Reque
 
 	err = uh.userStore.UpdateUser(existingUser)
 	if err != nil {
-		fmt.Println("Failed to update user", err)
-		http.Error(w, "Failed to update user", http.StatusInternalServerError)
+		uh.logger.Printf("ERROR - UpdateUser(): %v\n", err)
+		utils.WriteJSON(w, http.StatusInternalServerError, utils.Envelope{"error": "Failed to update new user"})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(existingUser)
-
+	utils.WriteJSON(w, http.StatusOK, utils.Envelope{"data": existingUser})
 }
 
 func (uh *UserHandler) HandleDeleteUserByID(w http.ResponseWriter, r *http.Request) {
-	paramUserId := chi.URLParam(r, "id")
-	if paramUserId == "" {
-		http.NotFound(w, r)
-		return
-	}
-
-	userID, err := strconv.ParseInt(paramUserId, 10, 64)
+	userID, err := utils.GetParamID(r)
 	if err != nil {
-		http.NotFound(w, r)
+		uh.logger.Printf("ERROR: GetParamID => %v\n", err)
+		utils.WriteJSON(w, http.StatusBadRequest, utils.Envelope{"error": "invalid user id"})
+		return
 	}
 
 	err = uh.userStore.DeleteUser(userID)
 	if err == sql.ErrNoRows {
-		http.Error(w, "Could not delete user", http.StatusNotFound)
+		uh.logger.Printf("ERROR - DeleteUser(): %v\n", err)
+		utils.WriteJSON(w, http.StatusNotFound, utils.Envelope{"error": "no record found"})
 		return
 	}
 
 	if err != nil {
-		fmt.Println("User Delete Error: ", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		uh.logger.Printf("ERROR - DeleteUser(): %v\n", err)
+		utils.WriteJSON(w, http.StatusInternalServerError, utils.Envelope{"error": "internal server error"})
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	// w.WriteHeader(http.StatusNoContent)
+	utils.WriteJSON(w, http.StatusNoContent, utils.Envelope{"data": "user deleted successfully"})
+}
+
+func (uh *UserHandler) HandleGetUserToken(w http.ResponseWriter, r *http.Request) {
+
 }

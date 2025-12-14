@@ -57,6 +57,7 @@ func (pg *PostgresWorkoutStore) CreateWorkout(workout *Workout) (*Workout, error
 	if err != nil {
 		return nil, err
 	}
+	fmt.Println("Workout Entries: ", workout.Entries)
 
 	for _, entry := range workout.Entries {
 		query := `
@@ -68,6 +69,9 @@ func (pg *PostgresWorkoutStore) CreateWorkout(workout *Workout) (*Workout, error
 		if err != nil {
 			return nil, err
 		}
+
+		fmt.Println("Entry ID: ", entry.ID)
+
 	}
 
 	err = tx.Commit()
@@ -75,6 +79,7 @@ func (pg *PostgresWorkoutStore) CreateWorkout(workout *Workout) (*Workout, error
 		return nil, err
 	}
 
+	fmt.Println("Workout: ", workout)
 	return workout, nil
 }
 
@@ -195,13 +200,6 @@ WHERE id = $5
 }
 
 func (pg *PostgresWorkoutStore) DeleteWorkout(id int64) error {
-	// tx, err := pg.db.Begin()
-	// if err != nil {
-	// 	return err
-	// }
-
-	// defer tx.Rollback()
-
 	query := `DELETE from workouts WHERE id = $1`
 
 	result, err := pg.db.Exec(query, id)
